@@ -14,8 +14,6 @@ load_dotenv()
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 DISCORD_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_USERNAME = os.getenv('GITHUB_USERNAME')
 
@@ -26,9 +24,7 @@ intents.reactions = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 bedrock_client = boto3.client(
     service_name='bedrock-runtime',
-    region_name=AWS_REGION,
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    region_name=AWS_REGION
 )
 github_client = Github(auth=Auth.Token(GITHUB_TOKEN))
 
