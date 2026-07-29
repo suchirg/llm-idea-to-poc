@@ -15,7 +15,7 @@ Get your Idea-to-POC bot running in 5 minutes!
 
 ```bash
 cd idea-to-poc
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ### 2. Set Up Discord Bot
@@ -52,7 +52,7 @@ pip install -r requirements.txt
 1. **Enable Bedrock Model Access**:
    - Go to AWS Console → Bedrock → Model access (in us-east-1 region)
    - Click "Manage model access" or "Enable specific models"
-   - Find "Claude 3.5 Haiku" and enable it
+   - Find "Claude Haiku 4.5" and enable it
    - Wait for status to show "Access granted" (usually instant)
 
 2. **Create IAM User with Bedrock Access**:
@@ -144,7 +144,7 @@ Monitoring channel ID: 123456789...
 
 ### AWS Bedrock / Claude errors
 - Verify your AWS credentials are correct
-- Check that you enabled model access for Claude 3.5 Haiku in Bedrock console
+- Check that you enabled model access for Claude Haiku 4.5 in Bedrock console
 - Make sure you're using us-east-1 region (or update `AWS_REGION` in `.env`)
 - Verify IAM user has `AmazonBedrockFullAccess` permission
 - Check AWS CloudWatch logs for detailed error messages

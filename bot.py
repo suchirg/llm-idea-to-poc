@@ -1,10 +1,11 @@
 import discord
 from discord.ext import commands
 import boto3
+import io
 import json
 import os
 from pathlib import Path
-from github import Github
+from github import Github, Auth
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,22 +30,21 @@ bedrock_client = boto3.client(
     aws_access_key_id=AWS_ACCESS_KEY_ID,
     aws_secret_access_key=AWS_SECRET_ACCESS_KEY
 )
-github_client = Github(GITHUB_TOKEN)
+github_client = Github(auth=Auth.Token(GITHUB_TOKEN))
 
 # State management
 STATE_FILE = 'state.json'
 
 # Claude model configuration
-CLAUDE_MODEL_ID = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+CLAUDE_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 def call_claude(messages, max_tokens=2000):
     """Call Claude via AWS Bedrock"""
-    # Convert messages to Bedrock format
     bedrock_messages = []
     for msg in messages:
         bedrock_messages.append({
             "role": msg["role"],
-            "content": [{"text": msg["content"]}]
+            "content": [{"type": "text", "text": msg["content"]}]
         })
 
     request_body = {
@@ -72,9 +72,8 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 async def create_status_message(channel):
-    """Create a new status message and pin it"""
+    """Create a new status message"""
     msg = await channel.send(embed=get_status_embed())
-    await msg.pin()
     current_idea['status_message_id'] = str(msg.id)
     save_state(current_idea)
     return msg
@@ -151,8 +150,11 @@ async def on_message(message):
     # Process commands first
     await bot.process_commands(message)
 
-    # Only respond in the designated channel
-    if message.channel.id != DISCORD_CHANNEL_ID:
+    # Only respond in the designated channel or its threads
+    channel_id = message.channel.id
+    if isinstance(message.channel, discord.Thread):
+        channel_id = message.channel.parent_id
+    if channel_id != DISCORD_CHANNEL_ID:
         return
 
     # Don't process idea messages if it's a command
@@ -208,7 +210,7 @@ async def ask_clarifying_question(thread):
     messages = [
         {
             "role": "user",
-            "content": f"I have a business idea: {current_idea['original_message']}\n\nI need you to ask me clarifying questions to understand this idea better. Ask ONE question at a time. Focus on understanding: the target users, the core problem being solved, key features needed for a POC, and technical requirements."
+            "content": f"I have a business idea: {current_idea['original_message']}\n\nI need you to ask me clarifying questions to understand this idea well enough to write a product spec and technical spec for a POC. Ask ONE question at a time. Focus on understanding: the target users, the core problem being solved, key features needed for a POC, and technical requirements. If you already have enough information to write the specs, respond with exactly READY instead of asking another question."
         }
     ]
 
@@ -217,22 +219,26 @@ async def ask_clarifying_question(thread):
         messages.append({"role": "assistant", "content": entry['question']})
         messages.append({"role": "user", "content": entry['answer']})
 
-    # Add prompt for next question or to generate specs
-    if current_idea['question_count'] < 5:
-        messages.append({
-            "role": "user",
-            "content": "Ask me the next most important clarifying question. Just ask the question, nothing else."
-        })
-    else:
-        # Move to spec generation
+    # Hard cap at 5 questions
+    if current_idea['question_count'] >= 5:
         await generate_specs(thread)
         return
 
-    question = call_claude(messages, max_tokens=500)
-    current_idea['current_question'] = question
+    messages.append({
+        "role": "user",
+        "content": "Ask the next most important clarifying question, or respond with exactly READY if you have enough information to write the specs."
+    })
+
+    response = call_claude(messages, max_tokens=500)
+
+    if response.strip() == "READY":
+        await generate_specs(thread)
+        return
+
+    current_idea['current_question'] = response
     save_state(current_idea)
 
-    await thread.send(question)
+    await thread.send(response)
 
 async def handle_thread_response(message):
     global current_idea
@@ -276,10 +282,15 @@ async def generate_specs(thread):
         "content": f"{context}\n\nProduct Spec:\n{product_spec}\n\nGenerate a brief technical spec for this POC. Include: tech stack recommendation, architecture overview, key components, deployment approach. Keep it under 300 words."
     }], max_tokens=2000)
 
-    # Post specs
+    # Post specs as attached markdown file
+    spec_content = f"# Product Spec\n\n{product_spec}\n\n# Technical Spec\n\n{tech_spec}"
+    spec_file = discord.File(
+        fp=io.BytesIO(spec_content.encode('utf-8')),
+        filename="specs.md"
+    )
+    await thread.send("Here are the generated specs:", file=spec_file)
     spec_message = await thread.send(
-        f"## Product Spec\n\n{product_spec}\n\n## Technical Spec\n\n{tech_spec}\n\n"
-        f"---\n\n✅ React with checkmark to build this POC, or reply with feedback to iterate on the specs."
+        "✅ React with checkmark to build this POC, or reply with feedback to iterate on the specs."
     )
 
     await spec_message.add_reaction('✅')
@@ -312,9 +323,14 @@ async def handle_spec_feedback(message):
         current_idea['tech_spec'] = tech_spec
         save_state(current_idea)
 
+        spec_content = f"# Product Spec (Updated)\n\n{product_spec}\n\n# Technical Spec (Updated)\n\n{tech_spec}"
+        spec_file = discord.File(
+            fp=io.BytesIO(spec_content.encode('utf-8')),
+            filename="specs_updated.md"
+        )
+        await message.channel.send("Updated specs:", file=spec_file)
         spec_message = await message.channel.send(
-            f"## Product Spec (Updated)\n\n{product_spec}\n\n## Technical Spec (Updated)\n\n{tech_spec}\n\n"
-            f"---\n\n✅ React with checkmark to build this POC, or reply with more feedback."
+            "✅ React with checkmark to build this POC, or reply with more feedback."
         )
 
         await spec_message.add_reaction('✅')
@@ -331,53 +347,77 @@ async def build_poc(message):
     save_state(current_idea)
     await update_status_message()
 
-    # Generate code using Claude
-    code_response = call_claude([{
-        "role": "user",
-        "content": f"""Product Spec:
+    try:
+        # Step 1: Get the file plan (repo name, description, file list)
+        plan_response = call_claude([{
+            "role": "user",
+            "content": f"""Product Spec:
 {current_idea['product_spec']}
 
 Technical Spec:
 {current_idea['tech_spec']}
 
-Generate a complete, working POC codebase. Include:
-1. All necessary source files with full implementation
-2. Package/dependency configuration files
-3. README with setup and deployment instructions
-4. Any configuration files needed
-
-Format your response as a JSON object with this structure:
+Plan out the file structure for this POC. Return a JSON object with:
 {{
   "repo_name": "suggested-repo-name",
   "description": "brief repo description",
-  "files": [
-    {{"path": "file/path.ext", "content": "file content"}},
-    ...
-  ]
+  "files": ["path/to/file1.ext", "path/to/file2.ext", ...]
 }}
 
-Make this a real, deployable POC - not pseudocode or placeholders."""
-    }], max_tokens=4000)
+List ALL files needed for a complete, deployable POC including README, config files, and source files. Keep it to 10 files max.
 
-    try:
-        # Parse the response
-        code_json = json.loads(code_response)
+IMPORTANT: Return ONLY raw JSON. No markdown, no code blocks, no explanation."""
+        }], max_tokens=2000)
 
-        # Create GitHub repo
+        plan_json = parse_json_response(plan_response)
+
+        # Step 2: Create GitHub repo (ensure unique name)
         user = github_client.get_user()
+        existing_repos = {r.name for r in user.get_repos()}
+        repo_name = plan_json['repo_name']
+        base_name = repo_name
+        counter = 2
+        while repo_name in existing_repos:
+            repo_name = f"{base_name}-{counter}"
+            counter += 1
+
         repo = user.create_repo(
-            name=code_json['repo_name'],
-            description=code_json['description'],
+            name=repo_name,
+            description=plan_json['description'],
             private=False,
-            auto_init=True
+            auto_init=False
         )
 
-        # Add files to repo
-        for file_info in code_json['files']:
+        await thread.send(f"Created repo: {repo.html_url}\nGenerating {len(plan_json['files'])} files...")
+
+        # Step 3: Generate each file individually
+        for file_path in plan_json['files']:
+            file_content = call_claude([{
+                "role": "user",
+                "content": f"""Product Spec:
+{current_idea['product_spec']}
+
+Technical Spec:
+{current_idea['tech_spec']}
+
+File structure of the project:
+{json.dumps(plan_json['files'], indent=2)}
+
+Generate the COMPLETE content for this file: {file_path}
+
+Write production-ready code, not pseudocode or placeholders. Return ONLY the raw file content - no markdown code blocks, no explanation, no file path header."""
+            }], max_tokens=4000)
+
+            # Strip code blocks if model wraps the content
+            clean_content = file_content.strip()
+            if clean_content.startswith("```"):
+                clean_content = clean_content.split("\n", 1)[1]
+                clean_content = clean_content.rsplit("```", 1)[0].strip()
+
             repo.create_file(
-                path=file_info['path'],
-                message=f"Add {file_info['path']}",
-                content=file_info['content']
+                path=file_path,
+                message=f"Add {file_path}",
+                content=clean_content
             )
 
         current_idea['stage'] = 'complete'
@@ -399,13 +439,26 @@ Make this a real, deployable POC - not pseudocode or placeholders."""
         save_state(current_idea)
         await update_status_message()
 
-    except json.JSONDecodeError:
-        await thread.send("❌ Failed to parse generated code. Let me try again...")
-        await build_poc(message)
     except Exception as e:
-        await thread.send(f"❌ Error creating repository: {str(e)}")
+        print(f"--- BUILD ERROR ---\n{e}\n--- END ---")
+        await thread.send(f"❌ Error building POC: {str(e)}")
         current_idea['stage'] = 'spec_review'
         save_state(current_idea)
+
+def parse_json_response(response):
+    """Extract and parse JSON from a Claude response"""
+    clean = response.strip()
+    if "```" in clean:
+        parts = clean.split("```")
+        inner = parts[1]
+        if inner.startswith("json"):
+            inner = inner[4:]
+        clean = inner.strip()
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError as e:
+        print(f"--- JSON PARSE ERROR ---\n{e}\n--- FULL RESPONSE ---\n{response}\n--- END ---")
+        raise
 
 @bot.command(name='template')
 async def post_template(ctx):

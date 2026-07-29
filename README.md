@@ -6,7 +6,7 @@ Discord bot that helps you go from idea to POC collaboratively.
 
 1. Install dependencies:
 ```bash
-pip install discord.py anthropic pygithub python-dotenv
+pip3 install -r requirements.txt
 ```
 
 2. Create a `.env` file with:
@@ -46,9 +46,9 @@ python bot.py
 3. Add permissions: `AmazonBedrockFullAccess`
 4. Create access key (Access Keys tab → Create access key)
 5. Copy the Access Key ID and Secret Access Key
-6. **Important**: Ensure Claude Haiku model access is enabled in AWS Bedrock console (us-east-1 region)
+6. **Important**: Ensure Claude Haiku 4.5 model access is enabled in AWS Bedrock console (us-east-1 region)
    - Go to AWS Bedrock Console → Model access
-   - Request access to "Claude 3.5 Haiku" if not already enabled
+   - Request access to "Claude Haiku 4.5" if not already enabled
 
 ### GitHub Token
 1. Go to https://github.com/settings/tokens
